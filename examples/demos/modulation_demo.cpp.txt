@@ -1,0 +1,375 @@
+/** SMC26 DSP course example: a tour of envelopes, modulation and
+ *  control.
+ *
+ *  These building blocks (dsp/Other) make no sound of their own -
+ *  they shape and steer a sound: when it starts and fades, how it
+ *  wobbles, which notes play, how many at once, and how loud it may
+ *  get. Here each one is shown on a simple synth sound, one at a time.
+ *
+ *  Press nextButton to move to the next one. Its name, and what
+ *  actionButton and the knobs do for it, is printed in the terminal.
+ *
+ *  The tour, in order:
+ *    0. AD envelope   - a hit: fast up, slow fade. actionButton hits it
+ *    1. LFO vibrato   - an LFO wobbles the pitch. actionButton steps
+ *                       through its 5 waveforms
+ *    2. sample & hold - a new random note on every step: bleeps.
+ *                       actionButton grabs a new one right now
+ *    3. sequencer     - a pattern of notes that plays itself.
+ *                       actionButton starts and stops it
+ *    4. voice manager - several notes at once: hold actionButton for
+ *                       a 4-note chord
+ *    5. limiter       - keeps a too-loud sound from distorting.
+ *                       actionButton switches it off and on, to compare
+ *
+ *  knobA, knobB  the two main settings of each one - see gNames below
+ *
+ *  To try it, copy this whole file into render.cpp and type
+ *  "make run" in the terminal. Ctrl-C stops it.
+ *
+ *  Wiring:
+ *    nextButton   - D0     knobA - A0
+ *    actionButton - D1     knobB - A1
+ *  Each button connects its pin to 3.3V when pressed, with a 10k
+ *  resistor from the pin to GND (a pull-down).
+ */
+
+// The building blocks: the board (Bela.h), the sensors, and the
+// synthesis, effects, filters and utilities. You do not need to
+// change these.
+#include <Bela.h>
+#include <cmath>
+#include "sensors/sensors.h"
+#include "dsp/dsp.h"
+
+// ---------------------------------------------------------------------
+// 1. Sensors
+// ---------------------------------------------------------------------
+
+Button nextButton;
+Button actionButton;
+
+Potentiometer knobA;
+Potentiometer knobB;
+
+// Change false to true to print the sensor values in the terminal
+bool gPrintValues = false;
+
+// Prints every sensor's value on one line. Add a line here for each
+// sensor you add. Only runs when gPrintValues is true.
+void PrintValues(BelaContext *context)
+{
+	PrintValue("next", nextButton.IsPressed());
+	PrintValue("action", actionButton.IsPressed());
+	PrintValue("knobA", dsp::FullRange(knobA.Read(context)));
+	PrintValue("knobB", dsp::FullRange(knobB.Read(context)));
+	PrintLineEnd();
+}
+
+// ---------------------------------------------------------------------
+// 2. Sound
+// ---------------------------------------------------------------------
+
+dsp::Oscillator tone;      // a steady saw, shaped by the parts below
+dsp::AdEnvelope ad;        // 0: AD envelope
+dsp::Lfo lfo;              // 1: LFO vibrato
+dsp::SampleHold steps;     // 2: sample & hold picks random pitches...
+dsp::AdEnvelope bleep;     //    ...and each one is a short bleep
+dsp::Sequencer seq;        // 3 and 5: the sequencer...
+dsp::Subtractive seqVoice; //    ...and the synth it plays
+dsp::VoiceManager<dsp::Subtractive, 4> poly; // 4: four synths, one manager
+dsp::Limiter limiter;      // 5: the limiter
+
+// A name for every part of the tour, in order. An enum gives each
+// number a name, so the code below can say LFO instead of 1.
+enum Part
+{
+	AD_ENVELOPE, LFO, SAMPLE_HOLD, SEQUENCER, VOICE_MANAGER, LIMITER, NUM_PARTS
+};
+
+// What is printed when you move to a part
+const char* gNames[NUM_PARTS] = {
+	"AD envelope   (D1: hit, A0: attack, A1: decay)",
+	"LFO vibrato   (D1: next waveform, A0: rate, A1: depth)",
+	"sample & hold (D1: grab now, A0: steps per second, A1: pitch range)",
+	"sequencer     (D1: start/stop, A0: tempo, A1: cutoff)",
+	"voice manager (D1: hold a 4-note chord, A0: root note, A1: cutoff)",
+	"limiter       (D1: limiter on/off, A0: input gain up to +18 dB)",
+};
+
+// The part playing now
+int gPart = 0;
+
+// The LFO's waveforms, in the order of dsp::Lfo::Waveform
+const int kNumLfoWaves = 5;
+const char* gLfoNames[kNumLfoWaves] = {"sine", "triangle", "square", "saw", "ramp"};
+int gLfoWave = 0;
+
+// Is the limiter on? actionButton flips it in the limiter part.
+bool gLimiterOn = true;
+
+// The sequencer pattern: a minor pentatonic riff. "0" is a rest - a
+// step where nothing plays.
+const int kNumSteps = 8;
+const char* gPattern[kNumSteps] = {"A2", "C3", "0", "E3", "A3", "0", "G3", "D3"};
+
+// The chord the voice manager plays, in semitones above the root: a
+// major seventh chord
+const int kChordSize = 4;
+float gChordSemitones[kChordSize] = {0.f, 4.f, 7.f, 11.f};
+float gChord[kChordSize]; // the frequencies held right now
+
+// ---------------------------------------------------------------------
+// 3. render()
+// ---------------------------------------------------------------------
+
+// Called by the board over and over, very fast, each time for the
+// next few samples of sound. Keep it quick: no printf() and no waiting
+// in here, or the sound will click and drop out.
+void render(BelaContext *context, void *userData)
+{
+	// Read the buttons first, so JustPressed() and JustReleased()
+	// below see the latest change
+	nextButton.Update(context);
+	actionButton.Update(context);
+
+	// Next part, wrapping back to the first after the last one. Let go
+	// of any held notes, so none is left playing. rt_printf is Bela's
+	// printf for render(): use it only now and then, like here once
+	// per press.
+	if(nextButton.JustPressed())
+	{
+		gPart = (gPart + 1) % NUM_PARTS;
+		rt_printf("%d: %s\n", gPart, gNames[gPart]);
+		for(int i = 0; i < kChordSize; i++)
+			poly.NoteOff(gChord[i]);
+		seqVoice.NoteOff();
+	}
+
+	// Both knobs 0 - 1
+	float a = dsp::FullRange(knobA.Read(context));
+	float b = dsp::FullRange(knobB.Read(context));
+
+	// The knobs and actionButton, for the part that is playing
+	switch(gPart)
+	{
+		case AD_ENVELOPE:
+			ad.SetAttack(dsp::MapExponential(a, 0.001f, 0.5f)); // seconds
+			ad.SetDecay(dsp::MapExponential(b, 0.05f, 2.f));    // seconds
+			if(actionButton.JustPressed())
+				ad.Hit();
+			break;
+		case LFO:
+			// The depth (knobB) is used in the loop below
+			lfo.SetFreq(dsp::MapExponential(a, 0.5f, 15.f));
+			if(actionButton.JustPressed())
+			{
+				gLfoWave = (gLfoWave + 1) % kNumLfoWaves;
+				lfo.SetWaveform((dsp::Lfo::Waveform)gLfoWave);
+				rt_printf("LFO: %s\n", gLfoNames[gLfoWave]);
+			}
+			break;
+		case SAMPLE_HOLD:
+			// The pitch range (knobB) is used in the loop below
+			steps.SetRate(dsp::MapExponential(a, 1.f, 20.f));
+			if(actionButton.JustPressed())
+				steps.Trigger();
+			break;
+		case SEQUENCER:
+			seq.SetTempo(dsp::MapLinear(a, 60.f, 240.f)); // beats per minute
+			seqVoice.SetCutoff(dsp::MapExponential(b, 200.f, 6000.f));
+			if(actionButton.JustPressed())
+			{
+				if(seq.IsRunning())
+					seq.Stop();
+				else
+				{
+					seq.Reset(); // start again from the first step
+					seq.Start();
+				}
+				rt_printf("%s\n", seq.IsRunning() ? "playing" : "stopped");
+			}
+			break;
+		case VOICE_MANAGER:
+			for(int v = 0; v < 4; v++)
+				poly.Voice(v).SetCutoff(dsp::MapExponential(b, 200.f, 6000.f));
+			// Press: start all four notes of the chord. The manager
+			// gives each note its own voice.
+			if(actionButton.JustPressed())
+			{
+				float root = dsp::MapExponential(a, 110.f, 440.f);
+				for(int i = 0; i < kChordSize; i++)
+				{
+					// Every semitone up multiplies the pitch by 2^(1/12)
+					gChord[i] = root * powf(2.f, gChordSemitones[i] / 12.f);
+					poly.NoteOn(gChord[i]);
+				}
+			}
+			// Release: let go of the same four notes
+			if(actionButton.JustReleased())
+				for(int i = 0; i < kChordSize; i++)
+					poly.NoteOff(gChord[i]);
+			break;
+		case LIMITER:
+			// The sequencer plays here too, so there is something loud
+			// to limit. The gain (knobA) is used in the loop below.
+			seq.Start();
+			if(actionButton.JustPressed())
+			{
+				gLimiterOn = !gLimiterOn;
+				rt_printf("%s\n", gLimiterOn ? "limiter on" : "limiter off (hard clipping)");
+			}
+			break;
+	}
+
+	// About 10 times a second, print the sensor values - only if
+	// gPrintValues is true
+	if(gPrintValues && TimeToPrint(context))
+		PrintValues(context);
+
+	// Runs once per sample - context->audioFrames samples each time
+	for(unsigned int n = 0; n < context->audioFrames; n++)
+	{
+		float out = 0.f;
+		switch(gPart)
+		{
+			case AD_ENVELOPE:
+				// The envelope sets the volume of the saw
+				tone.SetFreq(220.f);
+				out = tone.Process() * ad.Process();
+				break;
+			case LFO:
+			{
+				// Up to one octave (12 semitones) of vibrato either way
+				// around A3. The LFO runs here, once per sample, so
+				// the pitch moves smoothly.
+				float semitones = 12.f * b * lfo.Process();
+				tone.SetFreq(220.f * powf(2.f, semitones / 12.f));
+				out = 0.5f * tone.Process();
+				break;
+			}
+			case SAMPLE_HOLD:
+			{
+				// A random value, -1 to 1, held until the next step.
+				// Turned into a pitch up to 2 octaves either way of
+				// A4, and every new step starts a bleep.
+				float value = steps.Process();
+				if(steps.Stepped())
+					bleep.Hit();
+				tone.SetFreq(440.f * powf(2.f, 2.f * b * value));
+				out = tone.Process() * bleep.Process();
+				break;
+			}
+			case SEQUENCER:
+			case LIMITER:
+				// Process() is true when a new step starts. Play its
+				// note, unless the step is a rest.
+				if(seq.Process() && seq.CurrentGate())
+				{
+					seqVoice.SetFreq(seq.CurrentFreq());
+					seqVoice.NoteOn();
+				}
+				out = seqVoice.Process();
+				break;
+			case VOICE_MANAGER:
+				// All four voices mixed together
+				out = 0.4f * poly.Process();
+				break;
+		}
+
+		// The limiter part: turn the sound up by 1 to 8 times (up to
+		// +18 dB), then either limit it smoothly, or just cut off
+		// everything past 1 (hard clipping - harsh distortion)
+		if(gPart == LIMITER)
+		{
+			out *= dsp::MapExponential(a, 1.f, 8.f);
+			if(gLimiterOn)
+				out = limiter.Process(out);
+			else
+				out = dsp::Clamp(out, -1.f, 1.f);
+		}
+
+		// Turned down by 8 dB, to a safe level
+		float sample = dsp::ApplyGain(out, -8.f);
+
+		// Send it to the left (0) and right (1) outputs
+		audioWrite(context, n, 0, sample);
+		audioWrite(context, n, 1, sample);
+	}
+}
+
+// ---------------------------------------------------------------------
+// 4. setup()
+// ---------------------------------------------------------------------
+
+// Runs once, before the sound starts
+bool setup(BelaContext *context, void *userData)
+{
+	// Keeps fading sounds from overloading the CPU - leave this here
+	dsp::FlushDenormals();
+
+	// Tell each sensor which pin it is plugged into
+	nextButton.Init(context, 0);   // digital pin D0
+	actionButton.Init(context, 1); // digital pin D1
+	knobA.Init(0);                 // analog input A0
+	knobB.Init(1);                 // analog input A1
+
+	float sampleRate = context->audioSampleRate;
+
+	// A note that never ends: full sustain, started once here. The
+	// parts above shape it.
+	tone.Init(sampleRate);
+	tone.SetWaveform(dsp::Oscillator::WAVE_SAW);
+	tone.SetAmpSustain(1.f);
+	tone.NoteOn();
+
+	ad.Init(sampleRate);
+	lfo.Init(sampleRate);
+	steps.Init(sampleRate);
+
+	// A bleep: 2 ms up, 120 ms down
+	bleep.Init(sampleRate);
+	bleep.SetAttack(0.002f);
+	bleep.SetDecay(0.12f);
+
+	// The sequencer: 2 steps per beat (eighth notes), 8 steps. Note
+	// names become frequencies with NoteToFreq; a "0" step is a rest.
+	seq.Init(sampleRate);
+	seq.SetTempo(120.f);
+	seq.SetStepsPerBeat(2);
+	seq.SetNumSteps(kNumSteps);
+	for(int i = 0; i < kNumSteps; i++)
+	{
+		bool rest = gPattern[i][0] == '0';
+		seq.SetStep(i, rest ? 0.f : dsp::NoteToFreq(gPattern[i]), !rest);
+	}
+
+	// The sequencer's synth: a short, bright pluck on every step
+	seqVoice.Init(sampleRate);
+	seqVoice.SetResonance(0.4f);
+	seqVoice.SetFilterEnvAmount(2500.f);
+	seqVoice.SetAmpSustain(0.f);
+	seqVoice.SetAmpDecay(0.25f);
+
+	// The four voices of the chord, with a long release
+	poly.Init(sampleRate);
+	for(int v = 0; v < 4; v++)
+	{
+		poly.Voice(v).SetFilterEnvAmount(1000.f);
+		poly.Voice(v).SetAmpRelease(0.6f);
+	}
+
+	limiter.Init();
+
+	// Say which part we start with
+	rt_printf("%d: %s\n", gPart, gNames[gPart]);
+
+	// From here on, the board keeps calling render()
+	return true;
+}
+
+// Runs once when the program stops
+void cleanup(BelaContext *context, void *userData)
+{
+	// Nothing to do here
+}

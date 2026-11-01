@@ -1,0 +1,311 @@
+/** SMC26 DSP course example: a tour of every effect.
+ *
+ *  An effect changes a sound that is already there. Here a short synth
+ *  melody plays by itself (A, C, E, G, round and round) and goes
+ *  through one effect at a time, so you can hear what each one does.
+ *
+ *  Press nextButton to move to the next effect. Its name, and what the
+ *  knobs do for it, is printed in the terminal. Press bypassButton to
+ *  switch the effect off and on (each press flips it), to hear the
+ *  difference.
+ *
+ *  The effects, in order:
+ *    0. overdrive           - pushes the sound into warm distortion
+ *    1. wavefolder          - folds loud parts back down: a buzzy edge
+ *    2. sample-rate reducer - lo-fi, like an old games console
+ *    3. tremolo             - the volume wobbles up and down
+ *    4. delay               - echoes
+ *    5. chorus              - several slightly out-of-tune copies: wide
+ *    6. flanger             - a sweeping "jet plane" whoosh
+ *    7. phaser              - a softer, swirling sweep
+ *    8. pitch shifter       - the same melody, higher or lower
+ *    9. reverb              - the sound in a room or a hall (stereo)
+ *
+ *  knobA, knobB  the two main settings of each effect - see gNames
+ *                below
+ *
+ *  To try it, copy this whole file into render.cpp and type
+ *  "make run" in the terminal. Ctrl-C stops it.
+ *
+ *  Wiring:
+ *    nextButton   - D0     knobA - A0
+ *    bypassButton - D1     knobB - A1
+ *  Each button connects its pin to 3.3V when pressed, with a 10k
+ *  resistor from the pin to GND (a pull-down).
+ */
+
+// The building blocks: the board (Bela.h), the sensors, and the
+// synthesis, effects, filters and utilities. You do not need to
+// change these.
+#include <Bela.h>
+#include <cmath>
+#include "sensors/sensors.h"
+#include "dsp/dsp.h"
+
+// ---------------------------------------------------------------------
+// 1. Sensors
+// ---------------------------------------------------------------------
+
+Button nextButton;
+Button bypassButton;
+
+Potentiometer knobA;
+Potentiometer knobB;
+
+// Change false to true to print the sensor values in the terminal
+bool gPrintValues = false;
+
+// Prints every sensor's value on one line. Add a line here for each
+// sensor you add. Only runs when gPrintValues is true.
+void PrintValues(BelaContext *context)
+{
+	PrintValue("next", nextButton.IsPressed());
+	PrintValue("bypass", bypassButton.Toggled());
+	PrintValue("knobA", dsp::FullRange(knobA.Read(context)));
+	PrintValue("knobB", dsp::FullRange(knobB.Read(context)));
+	PrintLineEnd();
+}
+
+// ---------------------------------------------------------------------
+// 2. Sound
+// ---------------------------------------------------------------------
+
+// The sound going into the effects: a short, plucked synth note
+dsp::Subtractive synth;
+
+// One of each effect. Only the one you picked is used.
+dsp::Overdrive overdrive;
+dsp::WaveFolder waveFolder;
+dsp::SampleRateReducer reducer;
+dsp::Tremolo tremolo;
+dsp::Delay delay;
+dsp::Chorus chorus;
+dsp::Flanger flanger;
+dsp::Phaser phaser;
+dsp::PitchShifter pitchShifter;
+dsp::Reverb reverb; // big: always declare it up here, never inside a function
+
+// A name for every effect, in order. An enum gives each number a
+// name, so the code below can say DELAY instead of 4.
+enum Effect
+{
+	OVERDRIVE, WAVEFOLDER, REDUCER, TREMOLO, DELAY, CHORUS, FLANGER, PHASER,
+	PITCH_SHIFTER, REVERB, NUM_EFFECTS
+};
+
+// What is printed when you move to an effect
+const char* gNames[NUM_EFFECTS] = {
+	"overdrive           (A0: drive)",
+	"wavefolder          (A0: amount)",
+	"sample-rate reducer (A0: crunch)",
+	"tremolo             (A0: rate, A1: depth)",
+	"delay               (A0: time, A1: feedback)",
+	"chorus              (A0: rate, A1: depth)",
+	"flanger             (A0: rate, A1: feedback)",
+	"phaser              (A0: rate, A1: feedback)",
+	"pitch shifter       (A0: transpose -12..+12, A1: drift)",
+	"reverb              (A0: time, A1: mix) - stereo",
+};
+
+// The effect playing now
+int gEffect = 0;
+
+// The melody: four notes, played one after the other, round and round
+const int kNumNotes = 4;
+float gNotes[kNumNotes] = {
+	dsp::NoteToFreq("A2"),
+	dsp::NoteToFreq("C3"),
+	dsp::NoteToFreq("E3"),
+	dsp::NoteToFreq("G3"),
+};
+int gNote = 0;                // the next note to play
+unsigned int gStepFrames = 0; // samples from one note to the next (set in setup())
+unsigned int gFrame = 0;      // samples since the last note started
+bool gNoteHeld = false;       // is the note still held down?
+
+// ---------------------------------------------------------------------
+// 3. render()
+// ---------------------------------------------------------------------
+
+// Called by the board over and over, very fast, each time for the
+// next few samples of sound. Keep it quick: no printf() and no waiting
+// in here, or the sound will click and drop out.
+void render(BelaContext *context, void *userData)
+{
+	// Read the buttons first, so JustPressed() below sees the latest
+	// press
+	nextButton.Update(context);
+	bypassButton.Update(context);
+
+	// Next effect, wrapping back to the first after the last one.
+	// rt_printf is Bela's printf for render(): use it only now and
+	// then, like here once per press.
+	if(nextButton.JustPressed())
+	{
+		gEffect = (gEffect + 1) % NUM_EFFECTS;
+		rt_printf("%d: %s\n", gEffect, gNames[gEffect]);
+	}
+
+	// Toggled() flips on every press: false = effect on, true = bypass
+	bool bypass = bypassButton.Toggled();
+	if(bypassButton.JustPressed())
+		rt_printf("%s\n", bypass ? "bypass" : "effect on");
+
+	// Both knobs 0 - 1
+	float a = dsp::FullRange(knobA.Read(context));
+	float b = dsp::FullRange(knobB.Read(context));
+
+	// Give the knobs to the effect that is playing
+	switch(gEffect)
+	{
+		case OVERDRIVE: overdrive.SetDrive(dsp::MapLinear(a, 0.2f, 0.7f)); break;
+		case WAVEFOLDER: waveFolder.SetAmount(a); break;
+		// Knob up = more crunch = a lower sample rate
+		case REDUCER: reducer.SetAmount(dsp::MapLinear(1.f - a, 0.02f, 1.f)); break;
+		case TREMOLO:
+			tremolo.SetFreq(dsp::MapExponential(a, 1.f, 15.f));
+			tremolo.SetDepth(b);
+			break;
+		case DELAY:
+			delay.SetTimeMs(dsp::MapLinear(a, 50.f, 800.f));
+			delay.SetFeedback(b);
+			break;
+		case CHORUS:
+			chorus.SetLfoFreq(dsp::MapExponential(a, 0.1f, 5.f));
+			chorus.SetLfoDepth(b);
+			break;
+		case FLANGER:
+			flanger.SetLfoFreq(dsp::MapExponential(a, 0.05f, 2.f));
+			flanger.SetFeedback(b * 0.9f);
+			break;
+		case PHASER:
+			phaser.SetLfoFreq(dsp::MapExponential(a, 0.05f, 2.f));
+			phaser.SetFeedback(b * 0.9f);
+			break;
+		case PITCH_SHIFTER:
+			// roundf() snaps to whole semitones, so it stays in tune
+			pitchShifter.SetTranspose(roundf(dsp::MapLinear(a, -12.f, 12.f)));
+			pitchShifter.SetDrift(b);
+			break;
+		case REVERB:
+			reverb.SetTime(dsp::MapLinear(a, 0.3f, 0.98f));
+			reverb.SetMix(b);
+			break;
+	}
+
+	// The melody plays by itself: count the samples, start a new note
+	// every step, and let go of it halfway through the step
+	gFrame += context->audioFrames;
+	if(gFrame >= gStepFrames)
+	{
+		gFrame -= gStepFrames;
+		synth.SetFreq(gNotes[gNote]);
+		synth.NoteOn();
+		gNoteHeld = true;
+		gNote = (gNote + 1) % kNumNotes;
+	}
+	if(gNoteHeld && gFrame >= gStepFrames / 2)
+	{
+		synth.NoteOff();
+		gNoteHeld = false;
+	}
+
+	// About 10 times a second, print the sensor values - only if
+	// gPrintValues is true
+	if(gPrintValues && TimeToPrint(context))
+		PrintValues(context);
+
+	// Runs once per sample - context->audioFrames samples each time
+	for(unsigned int n = 0; n < context->audioFrames; n++)
+	{
+		// The synth note, the same in both ears to start with
+		float sample = synth.Process();
+		float left = sample;
+		float right = sample;
+
+		// Through the effect that is playing, unless bypassed. Every
+		// effect takes one sample in and gives one back - except the
+		// reverb, which takes left and right in and gives a different
+		// left and right back: that's what makes it sound wide.
+		if(!bypass)
+		{
+			switch(gEffect)
+			{
+				case OVERDRIVE: sample = overdrive.Process(sample); break;
+				case WAVEFOLDER: sample = waveFolder.Process(sample); break;
+				case REDUCER: sample = reducer.Process(sample); break;
+				case TREMOLO: sample = tremolo.Process(sample); break;
+				case DELAY: sample = delay.Process(sample); break;
+				case CHORUS: sample = chorus.Process(sample); break;
+				case FLANGER: sample = flanger.Process(sample); break;
+				case PHASER: sample = phaser.Process(sample); break;
+				case PITCH_SHIFTER: sample = pitchShifter.Process(sample); break;
+				case REVERB: reverb.Process(sample, sample, left, right); break;
+			}
+			if(gEffect != REVERB)
+			{
+				left = sample;
+				right = sample;
+			}
+		}
+
+		// Turned down by 8 dB - overdrive and folding get loud
+		audioWrite(context, n, 0, dsp::ApplyGain(left, -8.f));
+		audioWrite(context, n, 1, dsp::ApplyGain(right, -8.f));
+	}
+}
+
+// ---------------------------------------------------------------------
+// 4. setup()
+// ---------------------------------------------------------------------
+
+// Runs once, before the sound starts
+bool setup(BelaContext *context, void *userData)
+{
+	// Keeps fading sounds from overloading the CPU - leave this here
+	dsp::FlushDenormals();
+
+	// Tell each sensor which pin it is plugged into
+	nextButton.Init(context, 0);   // digital pin D0
+	bypassButton.Init(context, 1); // digital pin D1
+	knobA.Init(0);                 // analog input A0
+	knobB.Init(1);                 // analog input A1
+
+	float sampleRate = context->audioSampleRate;
+
+	// A short, bright pluck: easy to hear what an effect does to it
+	synth.Init(sampleRate);
+	synth.SetCutoff(1500.f);
+	synth.SetResonance(0.3f);
+	synth.SetFilterEnvAmount(2000.f);
+	synth.SetAmpRelease(0.15f);
+
+	// The first three don't need the sample rate
+	overdrive.Init();
+	waveFolder.Init();
+	reducer.Init();
+	tremolo.Init(sampleRate);
+	delay.Init(sampleRate);
+	chorus.Init(sampleRate);
+	flanger.Init(sampleRate);
+	phaser.Init(sampleRate);
+	pitchShifter.Init(sampleRate);
+	reverb.Init(sampleRate);
+
+	// A new note every 0.4 seconds. gFrame starts full, so the first
+	// note plays straight away.
+	gStepFrames = (unsigned int)(0.4f * sampleRate);
+	gFrame = gStepFrames;
+
+	// Say which effect we start with
+	rt_printf("%d: %s\n", gEffect, gNames[gEffect]);
+
+	// From here on, the board keeps calling render()
+	return true;
+}
+
+// Runs once when the program stops
+void cleanup(BelaContext *context, void *userData)
+{
+	// Nothing to do here
+}

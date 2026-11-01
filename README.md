@@ -185,6 +185,15 @@ Save your own `render.cpp` somewhere first if you want to keep it.
 | [`voice_manager`](examples/voice_manager.cpp.txt) | Playing several notes at once |
 | [`lfo_vibrato`](examples/lfo_vibrato.cpp.txt) | An LFO moving the pitch of a tone, with all five LFO waveforms |
 
+**Demos**: every building block of one kind in one file, played with 2 buttons (D0 = next, D1 = play, bypass or action) and the knobs: A0, A1, and in `synthesis_demo` all five (A0–A4 = the voice's settings, the volume is fixed). The name of what's playing is printed in the terminal:
+
+| Example | What you hear |
+| --- | --- |
+| [`demos/synthesis_demo`](examples/demos/synthesis_demo.cpp.txt) | Every synthesis voice: noises, subtractive, additive, FM, granular, drums, physical models, sampler |
+| [`demos/filters_demo`](examples/demos/filters_demo.cpp.txt) | Every filter and mode, on a saw drone |
+| [`demos/effects_demo`](examples/demos/effects_demo.cpp.txt) | Every effect, on a melody that plays by itself |
+| [`demos/modulation_demo`](examples/demos/modulation_demo.cpp.txt) | AD envelope, LFO, sample & hold, sequencer, voice manager and limiter |
+
 **Bela extras**, no extra hardware needed:
 
 | Example | What it shows |

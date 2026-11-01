@@ -1,0 +1,230 @@
+/** SMC26 DSP course example: a tour of every filter.
+ *
+ *  A filter lets some frequencies of a sound through and holds others
+ *  back - it changes the "colour" of a sound, from dark to bright, or
+ *  thin, or hollow. Here a buzzy saw drone (lots of frequencies to
+ *  play with) goes through one filter at a time.
+ *
+ *  Press nextButton to move to the next filter. Its name is printed in
+ *  the terminal. Hold bypassButton to hear the drone without a filter,
+ *  to compare.
+ *
+ *  The filters, in order:
+ *    0. state variable lowpass  - lets the lows through: darker
+ *    1. state variable bandpass - only a band around the cutoff: thin
+ *    2. state variable notch    - takes out a band: hollow
+ *    3. ladder lowpass 24 dB    - the classic, thick synth filter
+ *    4. ladder highpass 12 dB   - lets the highs through: thinner
+ *    5. one-pole lowpass        - gentle darkening
+ *    6. one-pole highpass       - gently takes away the bass
+ *    7. all-pass bandpass       - a band around the cutoff, A1 = width
+ *    8. all-pass band-reject    - takes out a band, A1 = width
+ *
+ *  cutoffKnob     where the filter works: 50 Hz (low) up to 8000 Hz
+ *  resonanceKnob  how much it rings ("sings") around the cutoff. For
+ *                 the all-pass filters, how wide the band is. The
+ *                 one-pole filters have no resonance.
+ *
+ *  To try it, copy this whole file into render.cpp and type
+ *  "make run" in the terminal. Ctrl-C stops it.
+ *
+ *  Wiring:
+ *    nextButton   - D0     cutoffKnob    - A0
+ *    bypassButton - D1     resonanceKnob - A1
+ *  Each button connects its pin to 3.3V when pressed, with a 10k
+ *  resistor from the pin to GND (a pull-down).
+ */
+
+// The building blocks: the board (Bela.h), the sensors, and the
+// synthesis, effects, filters and utilities. You do not need to
+// change these.
+#include <Bela.h>
+#include "sensors/sensors.h"
+#include "dsp/dsp.h"
+
+// ---------------------------------------------------------------------
+// 1. Sensors
+// ---------------------------------------------------------------------
+
+Button nextButton;
+Button bypassButton;
+
+Potentiometer cutoffKnob;
+Potentiometer resonanceKnob;
+
+// Change false to true to print the sensor values in the terminal
+bool gPrintValues = false;
+
+// Prints every sensor's value on one line. Add a line here for each
+// sensor you add. Only runs when gPrintValues is true.
+void PrintValues(BelaContext *context)
+{
+	PrintValue("next", nextButton.IsPressed());
+	PrintValue("bypass", bypassButton.IsPressed());
+	PrintValue("cutoff", dsp::FullRange(cutoffKnob.Read(context)));
+	PrintValue("resonance", dsp::FullRange(resonanceKnob.Read(context)));
+	PrintLineEnd();
+}
+
+// ---------------------------------------------------------------------
+// 2. Sound
+// ---------------------------------------------------------------------
+
+// The drone that goes into the filters
+dsp::Oscillator osc;
+
+// One of each filter. Only the one you picked is used.
+dsp::StateVariableFilter svf;
+dsp::LadderFilter ladder;
+dsp::OnePoleFilter onePole;
+dsp::AllPassFilter allPass;
+
+// The filter settings nextButton steps through, in order. Some
+// filters appear more than once, in a different mode.
+const int kNumSettings = 9;
+const char* gNames[kNumSettings] = {
+	"state variable lowpass",
+	"state variable bandpass",
+	"state variable notch",
+	"ladder lowpass 24 dB",
+	"ladder highpass 12 dB",
+	"one-pole lowpass",
+	"one-pole highpass",
+	"all-pass bandpass",
+	"all-pass band-reject",
+};
+
+// The setting playing now
+int gSetting = 0;
+
+// Sets the mode of the filter for the setting that is playing
+void SetModes()
+{
+	switch(gSetting)
+	{
+		case 0: svf.SetMode(dsp::StateVariableFilter::MODE_LOWPASS); break;
+		case 1: svf.SetMode(dsp::StateVariableFilter::MODE_BANDPASS); break;
+		case 2: svf.SetMode(dsp::StateVariableFilter::MODE_NOTCH); break;
+		case 3: ladder.SetMode(dsp::LadderFilter::MODE_LOWPASS_24); break;
+		case 4: ladder.SetMode(dsp::LadderFilter::MODE_HIGHPASS_12); break;
+		case 5: onePole.SetMode(dsp::OnePoleFilter::MODE_LOWPASS); break;
+		case 6: onePole.SetMode(dsp::OnePoleFilter::MODE_HIGHPASS); break;
+		case 7: allPass.SetMode(dsp::AllPassFilter::MODE_BANDPASS); break;
+		case 8: allPass.SetMode(dsp::AllPassFilter::MODE_BANDREJECT); break;
+	}
+}
+
+// ---------------------------------------------------------------------
+// 3. render()
+// ---------------------------------------------------------------------
+
+// Called by the board over and over, very fast, each time for the
+// next few samples of sound. Keep it quick: no printf() and no waiting
+// in here, or the sound will click and drop out.
+void render(BelaContext *context, void *userData)
+{
+	// Read the buttons first, so JustPressed() below sees the latest
+	// press
+	nextButton.Update(context);
+	bypassButton.Update(context);
+
+	// Next filter, wrapping back to the first after the last one.
+	// rt_printf is Bela's printf for render(): use it only now and
+	// then, like here once per press.
+	if(nextButton.JustPressed())
+	{
+		gSetting = (gSetting + 1) % kNumSettings;
+		SetModes();
+		rt_printf("%d: %s\n", gSetting, gNames[gSetting]);
+	}
+
+	// Cutoff: MapExponential so the knob feels even across its whole
+	// travel (see dsp/Utility.h). Resonance is already 0 - 1.
+	float cutoff = dsp::MapExponential(dsp::FullRange(cutoffKnob.Read(context)), 50.f, 8000.f);
+	float amount = dsp::FullRange(resonanceKnob.Read(context));
+
+	// Give the knobs to every filter - only one of them is heard
+	svf.SetFreq(cutoff);
+	svf.SetResonance(amount);
+	ladder.SetFreq(cutoff);
+	ladder.SetResonance(amount); // up to 1: just short of whistling
+	onePole.SetFreq(cutoff);
+	allPass.SetFreq(cutoff);
+	allPass.SetBandwidth(dsp::MapExponential(amount, 20.f, 2000.f)); // in Hz
+
+	// About 10 times a second, print the sensor values - only if
+	// gPrintValues is true
+	if(gPrintValues && TimeToPrint(context))
+		PrintValues(context);
+
+	// Runs once per sample - context->audioFrames samples each time
+	for(unsigned int n = 0; n < context->audioFrames; n++)
+	{
+		// The drone, through the filter that is playing
+		float in = osc.Process();
+		float out;
+		if(bypassButton.IsPressed())
+			out = in; // no filter, to compare
+		else if(gSetting <= 2)
+			out = svf.Process(in);
+		else if(gSetting <= 4)
+			out = ladder.Process(in);
+		else if(gSetting <= 6)
+			out = onePole.Process(in);
+		else
+			out = allPass.Process(in);
+
+		// Turned down by 10 dB: resonant filters can get loud
+		float sample = dsp::ApplyGain(out, -10.f);
+
+		// Send it to the left (0) and right (1) outputs
+		audioWrite(context, n, 0, sample);
+		audioWrite(context, n, 1, sample);
+	}
+}
+
+// ---------------------------------------------------------------------
+// 4. setup()
+// ---------------------------------------------------------------------
+
+// Runs once, before the sound starts
+bool setup(BelaContext *context, void *userData)
+{
+	// Keeps fading sounds from overloading the CPU - leave this here
+	dsp::FlushDenormals();
+
+	// Tell each sensor which pin it is plugged into
+	nextButton.Init(context, 0);   // digital pin D0
+	bypassButton.Init(context, 1); // digital pin D1
+	cutoffKnob.Init(0);            // analog input A0
+	resonanceKnob.Init(1);         // analog input A1
+
+	float sampleRate = context->audioSampleRate;
+
+	// A saw drone on A2 that never stops: full sustain, started once
+	// here. A saw has every harmonic, so every filter has something
+	// to work on.
+	osc.Init(sampleRate);
+	osc.SetWaveform(dsp::Oscillator::WAVE_SAW);
+	osc.SetFreq(110.f);
+	osc.SetAmpSustain(1.f);
+	osc.NoteOn();
+
+	svf.Init(sampleRate);
+	ladder.Init(sampleRate);
+	onePole.Init(sampleRate);
+	allPass.Init(sampleRate);
+	SetModes();
+
+	// Say which filter we start with
+	rt_printf("%d: %s\n", gSetting, gNames[gSetting]);
+
+	// From here on, the board keeps calling render()
+	return true;
+}
+
+// Runs once when the program stops
+void cleanup(BelaContext *context, void *userData)
+{
+	// Nothing to do here
+}
