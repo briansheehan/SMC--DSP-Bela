@@ -1,50 +1,36 @@
-/** SMC26 DSP course example: a tour of every synthesis voice.
+/** SMC26 DSP course example: granular drone.
  *
- *  Every sound source in dsp/Synthesis, one at a time, played with the
- *  same five knobs and one button - so you can hear what each technique
- *  sounds like before you build an instrument with it.
+ *  Granular synthesis chops a sound into tiny pieces called grains -
+ *  a few thousandths of a second each - and plays lots of them, one
+ *  after another and overlapping. How long the grains are, and how
+ *  they move through the sound, changes its texture from smooth to
+ *  buzzy to fluttering - without changing its pitch.
  *
- *  Press nextButton to move to the next voice. Its name, and what the
- *  five knobs do for it, is printed in the terminal. Press playButton
- *  to play: notes sound for as long as you hold it, drums and the
- *  struck/plucked models are hit once per press.
+ *  Here three dsp::Granular voices - a root note, a fifth above and an
+ *  octave above - make a slow, evolving drone, with a long echo
+ *  behind it for space. The drone starts by itself when the board
+ *  turns on.
  *
- *  The voices, in order:
- *     0. white noise     - every frequency at once: "shhhh"
- *     1. coloured noise  - noise from dark (rumble) to bright (hiss)
- *     2. stepped noise   - a new random value at a set rate: bleeps
- *     3. subtractive     - a buzzy wave carved by a filter
- *     4. additive        - sine waves stacked into one sound
- *     5. FM              - one wave wobbling another's pitch: bells
- *     6. FM simple       - the same, with one envelope for both
- *     7. granular        - clouds of tiny slices of sound
- *     8. bass drum
- *     9. snare drum
- *    10. hi-hat
- *    11. Karplus-Strong  - a plucked string, from a burst of noise
- *    12. string voice    - a richer plucked/struck string model
- *    13. modal voice     - a struck object: bar, bell, bowl
- *    14. sampler         - a recorded drum loop, at any speed
+ *  Press droneButton to fade the drone out, and again to fade it back
+ *  in. Press freezeButton to freeze the grains in place (they stop
+ *  moving), and again to let them move.
  *
- *  Each voice uses all five knobs for its own settings - see gNames
- *  below. Mostly:
- *  knob0  the pitch (or the drum's tuning, or the noise's rate)
- *  knob1, three settings that change the sound
- *  knob2,
- *  knob3
- *  knob4  for the voices you hold, the release: how long the note
- *         fades out after you let go. For the drums and the
- *         struck/plucked models, how hard you hit them.
- *  The volume is fixed at -8 dB, a safe level for every voice.
+ *  pitchKnob  picks the root note (A minor scale, one octave up/down)
+ *  grainKnob  grain length: short = buzzy and grainy, long = smooth
+ *  motionKnob how fast the grains move: still, up to a shimmering flutter
+ *  detuneKnob pulls the three voices slightly out of tune with each
+ *             other, for a wider, wavier sound
+ *  spaceKnob  how much echo. All the way down = dry
  *
  *  To try it, copy this whole file into render.cpp and type
- *  "make run" in the terminal. Ctrl-C stops it. The sampler needs the
- *  samples/ folder on the Bela too.
+ *  "make run" in the terminal. Ctrl-C stops it.
  *
  *  Wiring:
- *    nextButton - D0     knob0 - A0     knob3 - A3
- *    playButton - D1     knob1 - A1     knob4 - A4
- *                        knob2 - A2
+ *    droneButton  - D0     pitchKnob  - A0
+ *    freezeButton - D1     grainKnob  - A1
+ *                          motionKnob - A2
+ *                          detuneKnob - A3
+ *                          spaceKnob  - A4
  *  Each button connects its pin to 3.3V when pressed, with a 10k
  *  resistor from the pin to GND (a pull-down).
  */
@@ -60,17 +46,14 @@
 // ---------------------------------------------------------------------
 // 1. Sensors
 // ---------------------------------------------------------------------
+Ultrasonic ultra;
 
-Button nextButton;
-Button playButton;
+//Potentiometer pitchKnob;
+//Potentiometer grainKnob;
+//Potentiometer motionKnob;
+Potentiometer detuneWobbler;
+//Potentiometer spaceKnob;
 
-// The five knobs do something different for every voice, so they are
-// just numbered
-Potentiometer knob0;
-Potentiometer knob1;
-Potentiometer knob2;
-Potentiometer knob3;
-Potentiometer knob4;
 
 // Change false to true to print the sensor values in the terminal
 bool gPrintValues = false;
@@ -79,13 +62,15 @@ bool gPrintValues = false;
 // sensor you add. Only runs when gPrintValues is true.
 void PrintValues(BelaContext *context)
 {
-	PrintValue("next", nextButton.IsPressed());
-	PrintValue("play", playButton.IsPressed());
-	PrintValue("A0", dsp::FullRange(knob0.Read(context)));
-	PrintValue("A1", dsp::FullRange(knob1.Read(context)));
-	PrintValue("A2", dsp::FullRange(knob2.Read(context)));
-	PrintValue("A3", dsp::FullRange(knob3.Read(context)));
-	PrintValue("A4", dsp::FullRange(knob4.Read(context)));
+	//PrintValue("droneOff", droneButton.Toggled());
+	//PrintValue("frozen", freezeButton.Toggled());
+	PrintValue("Ultra", ultra.Read(context));
+	//PrintValue("pitch", dsp::FullRange(pitchKnob.Read(context)));
+	//PrintValue("grain", dsp::FullRange(grainKnob.Read(context)));
+	//PrintValue("motion", dsp::FullRange(motionKnob.Read(context)));
+	//PrintValue("piezo", dsp::FullRange(piezo.Read(context)));	
+	PrintValue("detune", dsp::FullRange(detuneWobbler.Read(context)));
+	//PrintValue("space", dsp::FullRange(spaceKnob.Read(context)));
 	PrintLineEnd();
 }
 
@@ -93,56 +78,38 @@ void PrintValues(BelaContext *context)
 // 2. Sound
 // ---------------------------------------------------------------------
 
-// One of each voice. Only the one you picked makes sound.
-dsp::Noise whiteNoise;
-dsp::ColoredNoise coloredNoise;
-dsp::SteppedNoise steppedNoise;
-dsp::Adsr noiseGate; // the noises have no notes, so this fades them in and out
-dsp::Subtractive subtractive;
-dsp::Additive additive;
-dsp::FM fm;
-dsp::FMSimple fmSimple;
-dsp::Granular granular;
-dsp::SynthBassDrum kick;
-dsp::SynthSnareDrum snare;
-dsp::HiHat hiHat;
-dsp::KarplusString karplus;
-dsp::StringVoice stringVoice;
-dsp::ModalVoice modal;
-dsp::Sampler sampler;
+// Three granular voices. voices[0] plays the root note, voices[1] and
+// voices[2] the notes above it.
+const int kNumVoices = 3;
+dsp::Granular voices[kNumVoices];
 
-// A name for every voice, in order. An enum gives each number a name,
-// so the code below can say SNARE instead of 9.
-enum Voice
-{
-	WHITE_NOISE, COLORED_NOISE, STEPPED_NOISE, SUBTRACTIVE, ADDITIVE, FM, FM_SIMPLE,
-	GRANULAR, KICK, SNARE, HIHAT, KARPLUS, STRING_VOICE, MODAL, SAMPLER, NUM_VOICES
-};
+// How many semitones above the root each voice plays: the root
+// itself, a fifth (7) and an octave (12) - a calm, open chord
+float gVoiceSemitones[kNumVoices] = {0.f, 7.f, 12.f};
 
-// What is printed when you move to a voice: what each knob does
-const char* gNames[NUM_VOICES] = {
-	"white noise    (A0: -, A1: attack, A2: decay, A3: sustain, A4: release)",
-	"coloured noise (A0: colour, A1: attack, A2: decay, A3: sustain, A4: release)",
-	"stepped noise  (A0: step rate, A1: attack, A2: decay, A3: sustain, A4: release)",
-	"subtractive    (A0: pitch, A1: cutoff, A2: resonance, A3: filter sweep, A4: release)",
-	"additive       (A0: pitch, A1: rolloff, A2: number of harmonics, A3: stretch, A4: release)",
-	"FM             (A0: pitch, A1: mod depth, A2: mod ratio, A3: brightness while held, A4: release)",
-	"FM simple      (A0: pitch, A1: mod depth, A2: mod ratio, A3: brightness follows volume, A4: release)",
-	"granular       (A0: pitch, A1: scan speed, A2: grain size, A3: attack, A4: release)",
-	"bass drum      (A0: tuning, A1: decay, A2: tone, A3: dirtiness, A4: pitch sweep)",
-	"snare drum     (A0: tuning, A1: snappy, A2: decay, A3: pitch sweep, A4: how hard)",
-	"hi-hat         (A0: tuning, A1: decay, A2: tone, A3: noisiness, A4: how hard)",
-	"Karplus-Strong (A0: pitch, A1: damping, A2: brightness, A3: bridge/dispersion, A4: how hard)",
-	"string voice   (A0: pitch, A1: structure, A2: brightness, A3: damping, A4: how hard)",
-	"modal voice    (A0: pitch, A1: structure, A2: brightness, A3: damping, A4: how hard)",
-	"sampler        (A0: speed, A1: start, A2: length, A3: reverse, A4: release)",
-};
+// Each voice's grains move at a different speed - one even goes
+// backwards (negative) - so the three never move in step, and the
+// drone keeps slowly changing
+float gVoiceMotion[kNumVoices] = {1.f, -0.7f, 0.45f};
 
-// The voice playing now
-int gVoice = 0;
+// Which way each voice is pulled out of tune by detuneWobbler: the root
+// stays put, one goes sharp (+1), one goes flat (-1)
+float gVoiceDetune[kNumVoices] = {1.f, 1.f, 1.f};
 
-// The volume in dB: -8 dB is a safe level for every voice
-float gVolumeDb = -8.f;
+// A long echo behind the drone, for a sense of space
+//dsp::Delay echo;
+
+// The note pitchKnob is centered on
+float gRootNote = dsp::NoteToFreq("A2");
+
+float gUltraMax = 22.f; // Max reading (in cm) I expect: it is diameter of tambourine
+float gUltraThreshCeiling = 16.f; // Readings above this count as off
+float gUltraThreshFloor = 5.f; //Readings below this get squirrelly.
+
+float gWobblerMaxRaw = 0.5;
+float gWobblerZeroRaw = 0.376;
+float gWobblerMax = gWobblerMaxRaw - gWobblerZeroRaw;
+float gWobblerScaling = 1/gWobblerMax;
 
 // ---------------------------------------------------------------------
 // 3. render()
@@ -153,192 +120,83 @@ float gVolumeDb = -8.f;
 // in here, or the sound will click and drop out.
 void render(BelaContext *context, void *userData)
 {
-	// Read the buttons first, so JustPressed() and JustReleased()
-	// below see the latest change
-	nextButton.Update(context);
-	playButton.Update(context);
+	// Read the buttons first, so JustPressed() below sees the latest
+	// press
+	//droneButton.Update(context);
+	//freezeButton.Update(context);
 
-	// Next voice, wrapping back to the first after the last one.
-	// rt_printf is Bela's printf for render(): use it only now and
-	// then, like here once per press.
-	if(nextButton.JustPressed())
+	// Toggled() flips on every press. It starts false while the drone
+	// is already playing - so true means "fade it out".
+	// if(droneButton.JustPressed())
+	// {
+	// 	for(int v = 0; v < kNumVoices; v++)
+	// 	{
+	// 		if(droneButton.Toggled())
+	// 			voices[v].NoteOff();
+	// 		else
+	// 			voices[v].NoteOn();
+	// 	}
+	// }
+	float rawDistance = ultra.Read(context);
+	float distanceNorm = rawDistance/gUltraMax;
+
+	if (distanceNorm > 0.9)
 	{
-		gVoice = (gVoice + 1) % NUM_VOICES;
-		rt_printf("%d: %s\n", gVoice, gNames[gVoice]);
-	}
-
-	// All knobs 0 - 1
-	float k0 = dsp::FullRange(knob0.Read(context));
-	float k1 = dsp::FullRange(knob1.Read(context));
-	float k2 = dsp::FullRange(knob2.Read(context));
-	float k3 = dsp::FullRange(knob3.Read(context));
-	float k4 = dsp::FullRange(knob4.Read(context));
-
-	// The pitch, for the voices that play notes: 55 Hz (A1) to
-	// 880 Hz (A5)
-	float freq = dsp::MapExponential(k0, 55.f, 880.f);
-
-	// The release, for the voices you hold: 10 ms (stops at once)
-	// to 3 s
-	float release = dsp::MapExponential(k4, 0.01f, 3.f);
-
-	// Give the knobs to the voice that is playing
-	switch(gVoice)
-	{
-		case WHITE_NOISE:
-		case COLORED_NOISE:
-		case STEPPED_NOISE:
-			coloredNoise.SetColor(k0);
-			steppedNoise.SetFreq(dsp::MapExponential(k0, 50.f, 10000.f));
-			// The noises have no notes of their own, so all four
-			// stages of the envelope get a knob
-			noiseGate.SetAttack(dsp::MapExponential(k1, 0.005f, 2.f));
-			noiseGate.SetDecay(dsp::MapExponential(k2, 0.01f, 2.f));
-			noiseGate.SetSustain(k3);
-			noiseGate.SetRelease(release);
-			break;
-		case SUBTRACTIVE:
-			subtractive.SetFreq(freq);
-			subtractive.SetCutoff(dsp::MapExponential(k1, 100.f, 8000.f));
-			subtractive.SetResonance(k2 * 0.9f); // 1 would whistle
-			// How far the filter opens at the start of each note
-			subtractive.SetFilterEnvAmount(k3 * 5000.f);
-			subtractive.SetAmpRelease(release);
-			break;
-		case ADDITIVE:
-			additive.SetFreq(freq);
-			additive.SetRolloff(k1);
-			// 1 (a pure sine) up to 16 harmonics. roundf() makes it a
-			// whole number.
-			additive.SetNumHarmonics((int)roundf(dsp::MapLinear(k2, 1.f, 16.f)));
-			// Stretch: at 0 every harmonic is a whole number times the
-			// pitch (in tune). Turned up, the higher ones are pushed
-			// further up, out of tune: the sound turns into a bell.
-			for(int h = 0; h < 16; h++)
-				additive.SetHarmonicRatio(h, powf(h + 1, 1.f + k3 * 0.3f));
-			additive.SetAmpRelease(release);
-			break;
-		case FM:
-			fm.SetFreq(freq);
-			fm.SetModDepth(k1 * 8.f);
-			// Whole-number ratios 1 - 8 stay in tune; in between they
-			// would sound clangy
-			fm.SetModRatio(roundf(dsp::MapLinear(k2, 1.f, 8.f)));
-			// The modulation has its own envelope: bright at the start
-			// of the note, then down to this much while you hold it
-			fm.SetModSustain(k3);
-			fm.SetAmpRelease(release);
-			break;
-		case FM_SIMPLE:
-			fmSimple.SetFreq(freq);
-			fmSimple.SetModDepth(k1 * 8.f);
-			fmSimple.SetModRatio(roundf(dsp::MapLinear(k2, 1.f, 8.f)));
-			// 0: the tone stays the same for the whole note. 1: it gets
-			// darker as the note gets quieter, like a real instrument.
-			fmSimple.SetBrightness(k3);
-			fmSimple.SetRelease(release);
-			break;
-		case GRANULAR:
-			granular.SetFreq(freq);
-			granular.SetSpeed(dsp::MapLinear(k1, -1.f, 1.f));
-			granular.SetGrainSize(dsp::MapExponential(k2, 5.f, 90.f)); // in ms
-			granular.SetAmpAttack(dsp::MapExponential(k3, 0.01f, 3.f));
-			granular.SetAmpRelease(release);
-			break;
-		case KICK:
-			kick.SetFreq(dsp::MapExponential(k0, 30.f, 120.f));
-			kick.SetDecay(k1);
-			kick.SetTone(k2);
-			kick.SetDirtiness(k3);
-			kick.SetFmEnvelopeAmount(k4);
-			break;
-		case SNARE:
-			snare.SetFreq(dsp::MapExponential(k0, 100.f, 400.f));
-			snare.SetSnappy(k1);
-			snare.SetDecay(k2);
-			snare.SetFmAmount(k3);
-			snare.SetAccent(k4);
-			break;
-		case HIHAT:
-			hiHat.SetFreq(dsp::MapExponential(k0, 1000.f, 8000.f));
-			hiHat.SetDecay(k1);
-			hiHat.SetTone(k2);
-			hiHat.SetNoisiness(k3);
-			hiHat.SetAccent(k4);
-			break;
-		case KARPLUS:
-			karplus.SetFreq(freq);
-			karplus.SetDamping(k1);
-			karplus.SetBrightness(k2);
-			// Below halfway a curved bridge (the pitch bends), above
-			// it dispersion (a stiff, metallic string)
-			karplus.SetNonLinearity(dsp::MapLinear(k3, -1.f, 1.f));
-			// How hard to pluck is given to Pluck() below
-			break;
-		case STRING_VOICE:
-			stringVoice.SetFreq(freq);
-			stringVoice.SetStructure(k1);
-			stringVoice.SetBrightness(k2);
-			stringVoice.SetDamping(k3);
-			stringVoice.SetAccent(k4);
-			break;
-		case MODAL:
-			modal.SetFreq(freq);
-			modal.SetStructure(k1);
-			modal.SetBrightness(k2);
-			modal.SetDamping(k3);
-			modal.SetAccent(k4);
-			break;
-		case SAMPLER:
-			// The loop's normal speed is at C4 (about 262 Hz) - see
-			// SetRootFreq in dsp/Synthesis/Sampler.h
-			sampler.SetFreq(freq);
-			// The end is always after the start: A2 picks how much of
-			// the rest of the loop plays
-			sampler.SetStart(k1);
-			sampler.SetEnd(k1 + k2 * (1.f - k1));
-			// Above halfway, it plays backwards
-			sampler.SetReverse(k3 > 0.5f);
-			sampler.SetAmpRelease(release);
-			break;
-	}
-
-	// playButton: start a note, or hit a drum / pluck a string
-	if(playButton.JustPressed())
-	{
-		switch(gVoice)
+		for(int v = 0; v < kNumVoices; v++)
 		{
-			case WHITE_NOISE:
-			case COLORED_NOISE:
-			case STEPPED_NOISE: noiseGate.NoteOn(); break;
-			case SUBTRACTIVE: subtractive.NoteOn(); break;
-			case ADDITIVE: additive.NoteOn(); break;
-			case FM: fm.NoteOn(); break;
-			case FM_SIMPLE: fmSimple.NoteOn(); break;
-			case GRANULAR: granular.NoteOn(); break;
-			case KICK: kick.Hit(); break;
-			case SNARE: snare.Hit(); break;
-			case HIHAT: hiHat.Hit(); break;
-			// Never fully 0, so the string always makes a sound
-			case KARPLUS: karplus.Pluck(dsp::MapLinear(k4, 0.2f, 1.f)); break;
-			case STRING_VOICE: stringVoice.Strike(); break;
-			case MODAL: modal.Strike(); break;
-			case SAMPLER: sampler.NoteOn(); break;
-		}
+			voices[v].NoteOff();
+		}	
+	} else
+	{
+		for(int v = 0; v < kNumVoices; v++)
+		{
+			voices[v].NoteOn();
+		}	
+	}
+	// Grain length from 5 ms (buzzy) to 80 ms (smooth). MapExponential
+	// so the short end gets as much of the knob as the long end (see
+	// dsp/Utility.h).false
+	//float grainMs = dsp::MapExponential(dsp::FullRange(grainKnob.Read(context)), 5.f, 80.f);
+	float grainMs = dsp::MapExponential(distanceNorm, 5.f, 250.f);
+	// Root note: snaps to the notes of A minor, an octave either way
+	//float root = dsp::MapSemitones(dsp::FullRange(pitchKnob.Read(context)), gRootNote, 12.f, dsp::SCALE_MINOR);
+
+	float root = dsp::MapSemitones(dsp::FullRange(distanceNorm), gRootNote, 18.f, dsp::SCALE_MINOR);
+//	float root = dsp::MapPitchBend(dsp::FullRange(distanceNorm), gRootNote, 12.f);
+
+	// Detune: up to 25 cents (a quarter of a semitone) - enough to
+	// make the voices "beat" against each other slowly
+	float wobbler = (dsp::FullRange(detuneWobbler.Read(context)) - gWobblerZeroRaw) * gWobblerScaling; //gives approx -1 to +1
+	//wobbler = dsp::Clamp(wobbler, -1, 1);
+	float detuneCents = dsp::MapLinear(wobbler * -1, 0.f, 500.f);
+
+
+
+	// Motion: how fast the grains move through the sound. 0 when
+	// frozen, otherwise from 0 (still) up to 0.3.
+	//float motion = dsp::MapLinear(dsp::FullRange(motionKnob.Read(context)), 0.f, 0.3f);
+	float motion = dsp::MapLinear((wobbler + 1)/2, 0.f, 0.3f);
+
+	// if(freezeButton.Toggled())
+	// 	motion = 0.f;
+
+
+
+	for(int v = 0; v < kNumVoices; v++)
+	{
+		// Each voice: its interval above the root, plus its share of
+		// the detune. 100 cents = 1 semitone, and every semitone up
+		// multiplies the pitch by 2^(1/12).
+		float semitones = gVoiceSemitones[v] + gVoiceDetune[v] * detuneCents / 100.f;
+		voices[v].SetFreq(root * powf(2.f, semitones / 12.f));
+
+		voices[v].SetGrainSize(grainMs);
+		voices[v].SetSpeed(motion * gVoiceMotion[v]);
 	}
 
-	// Let go of every held note - also when you move to the next
-	// voice, so no note is left playing
-	if(playButton.JustReleased() || nextButton.JustPressed())
-	{
-		noiseGate.NoteOff();
-		subtractive.NoteOff();
-		additive.NoteOff();
-		fm.NoteOff();
-		fmSimple.NoteOff();
-		granular.NoteOff();
-		sampler.NoteOff();
-	}
+	// Echo: from dry up to half echo, half drone
+	//echo.SetMix(dsp::MapLinear(dsp::FullRange(spaceKnob.Read(context)), 0.f, 0.5f));
+	//echo.SetMix(dsp::MapLinear(dsp::FullRange(1), 0.f, 0.5f));
 
 	// About 10 times a second, print the sensor values - only if
 	// gPrintValues is true
@@ -348,30 +206,15 @@ void render(BelaContext *context, void *userData)
 	// Runs once per sample - context->audioFrames samples each time
 	for(unsigned int n = 0; n < context->audioFrames; n++)
 	{
-		// The next sample of the voice that is playing. The noises
-		// are multiplied by noiseGate, which fades them in and out.
-		float out = 0.f;
-		switch(gVoice)
-		{
-			case WHITE_NOISE: out = whiteNoise.Process() * noiseGate.Process(); break;
-			case COLORED_NOISE: out = coloredNoise.Process() * noiseGate.Process(); break;
-			case STEPPED_NOISE: out = steppedNoise.Process() * noiseGate.Process(); break;
-			case SUBTRACTIVE: out = subtractive.Process(); break;
-			case ADDITIVE: out = additive.Process(); break;
-			case FM: out = fm.Process(); break;
-			case FM_SIMPLE: out = fmSimple.Process(); break;
-			case GRANULAR: out = granular.Process(); break;
-			case KICK: out = kick.Process(); break;
-			case SNARE: out = snare.Process(); break;
-			case HIHAT: out = hiHat.Process(); break;
-			case KARPLUS: out = karplus.Process(); break;
-			case STRING_VOICE: out = stringVoice.Process(); break;
-			case MODAL: out = modal.Process(); break;
-			case SAMPLER: out = sampler.Process(); break;
-		}
+		// Add the three voices together
+		float sample = 0.f;
+		for(int v = 0; v < kNumVoices; v++)
+			sample += voices[v].Process();
 
-		// Turned down to a safe level
-		float sample = dsp::ApplyGain(out, gVolumeDb);
+		// Three voices added up get loud, so turn the mix down by
+		// 12 dB (see dsp::ApplyGain in dsp/Utility.h), then add the echo
+		//sample = echo.Process(dsp::ApplyGain(sample, -12.f));
+		sample = dsp::ApplyGain(sample, -12.f);
 
 		// Send it to the left (0) and right (1) outputs
 		audioWrite(context, n, 0, sample);
@@ -390,47 +233,36 @@ bool setup(BelaContext *context, void *userData)
 	dsp::FlushDenormals();
 
 	// Tell each sensor which pin it is plugged into
-	nextButton.Init(context, 0); // digital pin D0
-	playButton.Init(context, 1); // digital pin D1
-	knob0.Init(0);               // analog input A0
-	knob1.Init(1);               // analog input A1
-	knob2.Init(2);               // analog input A2
-	knob3.Init(3);               // analog input A3
-	knob4.Init(4);               // analog input A4
+	//droneButton.Init(context, 0);  // digital pin D0
+	//freezeButton.Init(context, 1); // digital pin D1
+	ultra.Init(context, 0, 1); // trig pin on 2, echo on 3
+	//pitchKnob.Init(0);             // analog input A0
+	//grainKnob.Init(1);             // analog input A1
+	//motionKnob.Init(2);            // analog input A2
+	//piezo.Init(1);
+	detuneWobbler.Init(0);            // analog input A0
+	//spaceKnob.Init(4);             // analog input A4
 
-	// Every voice needs to know the sample rate (plain Noise doesn't)
 	float sampleRate = context->audioSampleRate;
-	whiteNoise.Init();
-	coloredNoise.Init(sampleRate);
-	steppedNoise.Init(sampleRate);
-	noiseGate.Init(sampleRate);
-	subtractive.Init(sampleRate);
-	additive.Init(sampleRate);
-	fm.Init(sampleRate);
-	// A slower fade from the bright start of the note, so you can
-	// hear it change
-	fm.SetModDecay(0.5f);
-	fmSimple.Init(sampleRate);
-	// The note settles to half its volume, so you can hear the
-	// brightness (A3) follow it
-	fmSimple.SetDecay(0.6f);
-	fmSimple.SetSustain(0.5f);
-	granular.Init(sampleRate);
-	kick.Init(sampleRate);
-	snare.Init(sampleRate);
-	hiHat.Init(sampleRate);
-	karplus.Init(sampleRate);
-	stringVoice.Init(sampleRate);
-	modal.Init(sampleRate);
 
-	// The sampler reads its sound file now - never in render(). It
-	// loops for as long as playButton is held.
-	sampler.Init(sampleRate);
-	sampler.Load("samples/drum_loop.wav");
-	sampler.SetLoop(true);
+	// A drone should fade in and out slowly: 3 seconds in, 4 seconds
+	// out, and stay at full volume in between (sustain 1)
+	for(int v = 0; v < kNumVoices; v++)
+	{
+		voices[v].Init(sampleRate);
+		voices[v].SetAmpAttack(3.f);
+		voices[v].SetAmpSustain(1.f);
+		voices[v].SetAmpRelease(4.f);
+	}
 
-	// Say which voice we start with
-	rt_printf("%d: %s\n", gVoice, gNames[gVoice]);
+	// A slow echo that repeats for a long time
+	// echo.Init(sampleRate);
+	// echo.SetTimeMs(700.f);
+	// echo.SetFeedback(0.0f);
+
+	// Start the drone straight away
+	// for(int v = 0; v < kNumVoices; v++)
+	// 	voices[v].NoteOn();
 
 	// From here on, the board keeps calling render()
 	return true;
